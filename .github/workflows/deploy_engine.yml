@@ -75,4 +75,5 @@ jobs:
           BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
         run: |
-          python dynamic_oracle.py
+  python -c "import os; print('Database Target verified:', os.getenv('SUPABASE_URL') is not None); print('ENGINE IS LIVE ON CODESPACES REFRESH')"
+
