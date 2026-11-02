@@ -23,10 +23,10 @@ jobs:
       - name: Launch 24/7 Autonomous Ingestion Loop
         env:
           PYTHONDONTWRITEBYTECODE: 1
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: 1
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
           BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
         run: |
           python oracle_engine.py
-
