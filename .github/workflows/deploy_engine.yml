@@ -76,4 +76,3 @@ jobs:
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
         run: |
           python dynamic_oracle.py
-
