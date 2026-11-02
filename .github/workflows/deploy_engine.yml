@@ -1,0 +1,129 @@
+name: Verify and operate engine
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [verify, deploy, monitor]
+        default: verify
+      live_trading:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: sovereign-${{ github.event_name == 'workflow_dispatch' && inputs.operation || github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.6
+        env:
+          POSTGRES_PASSWORD: local-ci-only
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.7'
+          python-version: '3.12'
+      - run: uv sync --frozen
+      - run: uv run ruff check oracle tests
+      - run: uv run ruff format --check oracle tests
+      - run: uv run mypy oracle
+      - run: uv run python -m compileall -q oracle
+      - run: uv run pytest -q
+      - run: forge fmt --check
+      - run: forge build --sizes
+      - run: forge test -vvv
+      - name: Validate migration and failure feedback
+        env:
+          PGPASSWORD: local-ci-only
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -c 'CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;'
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f migrations/001_engine.sql
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f tests/learning.sql
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: production
+    strategy:
+      max-parallel: 1
+      matrix:
+        chain: [base, arbitrum]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: Deploy curated policy
+        env:
+          DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
+          DEPLOYMENT_CONFIG: ${{ vars.DEPLOYMENT_CONFIG }}
+          DEPLOY_RPC_ENDPOINTS: ${{ secrets.DEPLOY_RPC_ENDPOINTS }}
+          CHAIN: ${{ matrix.chain }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          config=json.loads(os.environ['DEPLOYMENT_CONFIG'])[os.environ['CHAIN']]
+          Path('deploy-policy.json').write_text(json.dumps(config['policy']))
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              for key in ['AAVE_POOL','EXECUTOR_ADDRESS','BENEFICIARY_ADDRESS','MAX_LOAN','MAX_PREMIUM_BPS']:
+                  value=str(config[key])
+                  if '\n' in value or '\r' in value: raise ValueError('Invalid deployment value')
+                  f.write(f'{key}={value}\n')
+          PY
+          rpc=$(python -c 'import json,os; print(json.loads(os.environ["DEPLOY_RPC_ENDPOINTS"])[os.environ["CHAIN"]])')
+          echo "::add-mask::$rpc"
+          expected=8453
+          if [ "$CHAIN" = arbitrum ]; then expected=42161; fi
+          test "$(cast chain-id --rpc-url "$rpc")" = "$expected"
+          forge script script/Deploy.s.sol:Deploy --rpc-url "$rpc" --broadcast --slow
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ matrix.chain }}
+          path: broadcast/Deploy.s.sol/
+  monitor:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'monitor'
+    needs: verify
+    runs-on: [self-hosted, linux, sovereign-engine]
+    environment: production
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.7'
+          python-version: '3.12'
+      - run: uv sync --frozen
+      - name: Run monitored execution session
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PRIVATE_RPC_ENDPOINTS: ${{ secrets.PRIVATE_RPC_ENDPOINTS }}
+          EXECUTION_WALLET_KEY: ${{ secrets.EXECUTION_WALLET_KEY }}
+          ENGINE_CONFIG_JSON: ${{ vars.ENGINE_CONFIG_JSON }}
+          ENGINE_CONFIG: ${{ runner.temp }}/engine-config.json
+          ENGINE_JOURNAL_DIR: ${{ vars.ENGINE_JOURNAL_DIR }}
+          LIVE_TRADING: ${{ inputs.live_trading && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          test -n "$ENGINE_JOURNAL_DIR"
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path(os.environ['ENGINE_CONFIG']).write_text(json.dumps(json.loads(os.environ['ENGINE_CONFIG_JSON'])))
+          PY
+          uv run python -m oracle.engine

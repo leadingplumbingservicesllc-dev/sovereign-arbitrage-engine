@@ -1,0 +1,5 @@
+{
+  "name": "sovereign-contract-toolchain",
+  "private": true,
+  "devDependencies": {"@foundry-rs/forge": "1.7.1"}
+}
